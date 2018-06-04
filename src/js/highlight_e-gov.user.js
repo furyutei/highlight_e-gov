@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name            highlight_e-gov
 // @namespace       https://furyu.hatenablog.com/
-// @version         0.0.1.0
+// @version         0.0.1.1
 // @description     e-gov 法令条文の括弧書きを強調
 // @author          furyu
 // @match           *://elaws.e-gov.go.jp/search/*
@@ -93,6 +93,7 @@ var DEFAULT_HIGHLIGHT_BRACKETS_OPTIONS = {
         classLevelPrefix : 'highlight-brackets-level-', // 強調用要素のレベル指定用クラス名の接頭辞
         
         strictMode : false, // true: テキストノードのみ置換(動作が重い) / false: HTMLタグも含めて置換(HTMLを壊す恐れあり・動作は軽い)
+        asyncRewrite : true, // true: HTML書換を非同期に実施
         excludeNodes :  ['style', 'script', 'textarea', 'iframe', 'frame'] // 対象外とするノード(strictMode: true時のみ有効)
     },
     
@@ -149,6 +150,10 @@ $.fn.highlight_brackets = ( () => {
         options = $.extend( {}, DEFAULT_HIGHLIGHT_BRACKETS_OPTIONS, options );
         
         var $self = this,
+            
+            $target_nodes,
+            total_number = 0,
+            remain_number = 0,
             
             leftBrackets = is_string( options.leftBrackets ) ? options.leftBrackets.split( '' ) : options.leftBrackets,
             rightBrackets = is_string( options.rightBrackets ) ? options.rightBrackets.split( '' ) : options.rightBrackets,
@@ -228,10 +233,18 @@ $.fn.highlight_brackets = ( () => {
                 html_stack.push( text_stack.join( '' ) );
                 
                 return html_stack.join( '' );
+            },
+            
+            log_remain = ( index ) => {
+                log_debug( 'index:', index, 'done. (remain: ', (-- remain_number), '/', total_number, ')' );
+                
+                if ( remain_number <= 0 ) {
+                    log_info( 'all done.' );
+                }
             };
         
         if ( options.strictMode ) {
-            $self.find( '*' ).addBack().not( excludeNodes.join( ',' ) ).contents()
+            $target_nodes = $self.find( '*' ).addBack().not( excludeNodes.join( ',' ) ).contents()
                 .filter( function() {
                     if ( this.nodeType != 3 ) {
                         return false;
@@ -251,20 +264,40 @@ $.fn.highlight_brackets = ( () => {
                     
                     return true;
                 } )
-                .each( function () {
-                    var $text_node = $( this );
-                        
-                    $text_node.before( $work.html( get_highlight_html( $text_node.text() ) ).contents() );
-                    $text_node.remove();
+                .each( function ( index ) {
+                    var $text_node = $( this ),
+                        rewrite = () => {
+                            $text_node.before( $work.html( get_highlight_html( $text_node.text() ) ).contents() );
+                            $text_node.remove();
+                            log_remain( index );
+                        };
+                    
+                    if ( options.asyncRewrite ) {
+                        setTimeout( rewrite, 1 );
+                    }
+                    else {
+                        rewrite();
+                    }
                 } );
         }
         else {
-            $self.each( function () {
-                var $node = $( this );
+            $target_nodes = $self.each( function ( index ) {
+                var $node = $( this ),
+                    rewrite = () => {
+                        $node.html( get_highlight_html( $node.html() ) );
+                        log_remain( index );
+                    };
                 
-                $node.html( get_highlight_html( $node.html() ) );
+                if ( options.asyncRewrite ) {
+                    setTimeout( rewrite, 1 );
+                }
+                else {
+                    rewrite();
+                }
             } );
         }
+        
+        total_number = remain_number = $target_nodes.length;
         
         return $self;
     };
