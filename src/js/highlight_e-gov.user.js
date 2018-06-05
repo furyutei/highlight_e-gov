@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name            highlight_e-gov
 // @namespace       https://furyu.hatenablog.com/
-// @version         0.0.1.1
+// @version         0.0.1.2
 // @description     e-gov 法令条文の括弧書きを強調
 // @author          furyu
 // @match           *://elaws.e-gov.go.jp/search/*
@@ -20,6 +20,13 @@ References
 - [m-haketa/colored_e-gov: e-govの税法条文に色をつけます](https://github.com/m-haketa/colored_e-gov)  
     Copyright (c) 2018 m-haketa  
     [The MIT Licence](https://github.com/m-haketa/colored_e-gov/blob/master/LICENSE)  
+
+- [protonet/jquery.inview: A jQuery plugin that adds a bindable 'inview' event for detecting when an element is scrolled into view.](https://github.com/protonet/jquery.inview)  
+    [jquery.inview/LICENSE](https://github.com/protonet/jquery.inview/blob/master/LICENSE)
+  - [based on the idea of Remy Sharp: Element 'in view' Event Plugin](https://remysharp.com/2009/01/26/element-in-view-event-plugin/)
+      [The MIT license](https://rem.mit-license.org/)
+  - [forked from zuk/jquery.inview: Remy Sharp's jQuery plugin adds a bindable 'inview' event for detecting when an element is scrolled into view.](https://github.com/zuk/jquery.inview/)
+      [The MIT license](https://github.com/zuk/jquery.inview/blob/master/LICENSE)
 */
 
 /*
@@ -52,8 +59,25 @@ THE SOFTWARE.
 
 var SCRIPT_NAME = 'highlight_e-gov',
     DEBUG = false,
-    
     $ = jQuery,
+    
+    DEFAULT_HIGHLIGHT_BRACKETS_OPTIONS = {
+        leftBrackets : '「（', // 対象開括弧(文字列: '「（' もしくは文字列の配列: ['「','（'] )
+        rightBrackets : '」）', // 対象閉括弧(同上)
+        // ※ leftBrackets と rightBrackets は 1:1 に対応させておくこと(文字列もしくは配列のインデックスが同じものをペアとみなす)
+        // ※ 括弧は左側（配列のインデックス小）のものが優先度高
+        
+        levelColors : [ '#CC0000', '#999900', '#009999', '#2020A0', '#CC00CC' ], // 括弧書きの強調色をカラーコードで列挙(ネストレベルに応じて強調色を切替)
+        
+        styleId : 'highlight-brackets-style', // CSS設定用style要素のid
+        tagName : 'span', // 強調(wrap)用要素タグ名
+        className : 'highlight-brackets', // 強調用要素の共通クラス名
+        classLevelPrefix : 'highlight-brackets-level-', // 強調用要素のレベル指定用クラス名の接頭辞
+        
+        strictMode : false, // true: テキストノードのみ置換(動作が重い) / false: HTMLタグも含めて置換(HTMLを壊す恐れあり・動作は軽い)
+        asyncRewrite : true, // true: HTML書換を非同期に実施
+        excludeNodes :  ['style', 'script', 'textarea', 'iframe', 'frame'] // 対象外とするノード(strictMode: true時のみ有効)
+    },
     
     IS_TOUCHED = ( () => {
         var touched_id = SCRIPT_NAME + '_touched',
@@ -80,42 +104,144 @@ if ( typeof console.log.apply == 'undefined' ) {
     console.log( 'note: console.log.apply is undefined => patched' );
 }
 
-var DEFAULT_HIGHLIGHT_BRACKETS_OPTIONS = {
-        leftBrackets : '「（', // 対象開括弧(文字列: '「（' もしくは文字列の配列: ['「','（'] )
-        rightBrackets : '」）', // 対象閉括弧(同上)
-        // ※ leftBrackets と rightBrackets は 1:1 に対応させておくこと(文字列もしくは配列のインデックスが同じものをペアとみなす)
-        
-        levelColors : [ '#CC0000', '#999900', '#009999', '#2020A0', '#CC00CC' ], // 括弧書きの強調色をカラーコードで列挙(ネストレベルに応じて強調色を切替)
-        
-        styleId : 'highlight-brackets-style', // CSS設定用style要素のid
-        tagName : 'span', // 強調(wrap)用要素タグ名
-        className : 'highlight-brackets', // 強調用要素の共通クラス名
-        classLevelPrefix : 'highlight-brackets-level-', // 強調用要素のレベル指定用クラス名の接頭辞
-        
-        strictMode : false, // true: テキストノードのみ置換(動作が重い) / false: HTMLタグも含めて置換(HTMLを壊す恐れあり・動作は軽い)
-        asyncRewrite : true, // true: HTML書換を非同期に実施
-        excludeNodes :  ['style', 'script', 'textarea', 'iframe', 'frame'] // 対象外とするノード(strictMode: true時のみ有効)
-    },
-    
-    to_array = ( array_like_object ) => Array.from( array_like_object ),
+var to_array = ( array_like_object ) => Array.from( array_like_object ),
     
     log_debug = function () {
         if ( ! DEBUG ) {
             return;
         }
         var arg_list = [ '[' + SCRIPT_NAME + ']', '(' + ( new Date().toISOString() ) + ')' ];
-        console.log.apply( console, arg_list.concat( to_array( arguments ) ) );
+        console.debug.apply( console, arg_list.concat( to_array( arguments ) ) );
     },
     
     log_info = function () {
         var arg_list = [ '[' + SCRIPT_NAME + ']', '(' + ( new Date().toISOString() ) + ')' ];
-        console.info.apply( console, arg_list.concat( to_array( arguments ) ) );
+        console.log.apply( console, arg_list.concat( to_array( arguments ) ) );
     },
     
     log_error = function () {
         var arg_list = [ '[' + SCRIPT_NAME + ']', '(' + ( new Date().toISOString() ) + ')' ];
         console.error.apply( console, arg_list.concat( to_array( arguments ) ) );
     };
+
+
+var init_inview_event = ( options ) => {
+    options = $.extend( {}, { $viewport : $( window ), watch_interval : 3000, fire_on_outview_event : false, split_count : 0, exist_check : false }, options );
+    //options = $.extend( {}, { $viewport : $( window ), watch_interval : 1500, fire_on_outview_event : false, split_count : 1000, exist_check : false }, options );
+    // TODO: パラメータ要調整
+    
+    var $viewport = options.$viewport,
+        inview_objects = [],
+        watch_timer_id,
+        document_element = document.documentElement,
+        
+        split_array = ( source_array, split_count ) => {
+            var result_array = [],
+                index = 0,
+                length = source_array.length;
+            
+            for ( ; index < length; index += split_count ) {
+                result_array.push( source_array.slice( index, index + split_count ) );
+            }
+            
+            return result_array;
+        },
+        
+        check_inview = function () {
+            var viewport_offset = $viewport.offset() || { top: 0, left: 0 },
+                viewport_size = { height : $viewport.height(), width : $viewport.width() },
+                viewport_scroll = { top : $viewport.scrollTop(), left : $viewport.scrollLeft() },
+                margin_offset = { height : viewport_size.height * 1.0, width : viewport_size.width * 1.0 },
+                
+                check_inview_object = ( inview_object ) => {
+                    var selector = inview_object.data.selector,
+                        $element = ( selector ) ? $( inview_object.$element ).find( selector ) : $( inview_object.$element );
+                    
+                    if ( options.exist_check ) {
+                        if ( ! $.contains( document_element, $element[ 0 ] ) ) {
+                            return;
+                        }
+                    }
+                    
+                    var element_offset = $element.offset(),
+                        element_size = { height : $element.height(), width : $element.width() },
+                        last_is_inview = $element.data( 'inview' );
+                    
+                    if (
+                        ( viewport_offset.left < element_offset.left + element_size.width + margin_offset.width ) &&
+                        ( element_offset.left < viewport_offset.left + viewport_size.width + margin_offset.width ) &&
+                        ( viewport_offset.top < element_offset.top + element_size.height + margin_offset.height ) &&
+                        ( element_offset.top < viewport_offset.top + viewport_size.height + margin_offset.height )
+                    ) {
+                        if ( ! last_is_inview ) {
+                            $element.data( 'inview', true ).trigger( 'inview', [ true ] );
+                        }
+                    }
+                    else {
+                        if ( last_is_inview ) {
+                            $element.data( 'inview', false );
+                            
+                            if ( options.fire_on_outview_event ) {
+                                $element.trigger( 'inview', [ false ] );
+                            }
+                        }
+                    }
+                };
+            
+            if ( 0 < options.split_count ) {
+                split_array( inview_objects, options.split_count ).map( ( splited_inview_objects ) => {
+                    setTimeout( function () {
+                        splited_inview_objects.map( check_inview_object );
+                    }, 1 );
+                } );
+            }
+            else {
+                inview_objects.map( check_inview_object );
+            }
+        };
+    
+    $.event.special.inview = {
+        add : function ( data ) {
+            var element = this,
+                $element = $( this );
+            
+            inview_objects.push( {
+                data : data,
+                element : element,
+                $element : $element
+            } );
+            
+            $element.data( 'inview', false );
+            
+            if ( ( 0 < options.watch_interval ) && ( ! watch_timer_id ) && ( 0 < inview_objects.length ) ) {
+                watch_timer_id = setInterval( check_inview, options.watch_interval );
+            }
+        },
+        
+        remove: function ( data ) {
+            var element = this;
+            
+            inview_objects = inview_objects.filter( function ( inview_object ) {
+                return ! ( ( inview_object.element === element ) && ( inview_object.data.guid === data.guid ) );
+            } );
+            
+            if ( inview_objects.length <= 0 ) {
+                clearInterval( watch_timer_id );
+                watch_timer_id = null;
+            }
+        }
+    };
+    
+    $( window ).on( 'scroll.inview resize.inview scrollstop.inview', function () {
+        check_inview();
+    } );
+    
+    if ( $viewport[ 0 ] !== $( window )[ 0 ] ) {
+        $viewport.on( 'scroll.inview scrollstop.inview', function () {
+            check_inview();
+        } );
+    }
+}; // end of init_inview_event()
 
 
 $.extend( {
@@ -207,19 +333,28 @@ $.fn.highlight_brackets = ( () => {
                             return;
                         }
                         
-                        var exist_bracket_index = bracket_stack.lastIndexOf( bracket );
+                        var exist_bracket_index = bracket_stack.lastIndexOf( bracket ),
+                            current_bracket_index = rightBrackets.indexOf( bracket ),
+                            expected_bracket_index = rightBrackets.indexOf( expected_bracket );
                         
-                        if ( exist_bracket_index < 0 ) {
+                        if (
+                            ( expected_bracket_index < current_bracket_index ) ||
+                                // ※ 括弧は rightBrackets の左側（インデックス小）のものが優先度高
+                                // ※ "「…）…」" のように、'」'(優先度高)待ち中に'）'(優先度低)が現れると、"「<span>…）</span>…」" となるようラップ
+                            ( exist_bracket_index < 0 )
+                                // ※ "…）…"のように、待ち状態でないのに閉括弧が現れると、"<span>…）</span>…" となるようラップ
+                        ) {
                             text_stack.unshift( get_open_tag( bracket_level + 1 ) );
                             bracket_stack.push( bracket );
-                            check_bracket( bracket );
-                            return;
+                        }
+                        else {
+                            // ※ "「…（…」" のように、'）'(優先度低)待ち中に'」'(優先度高)が現れると、"「…<span>（…</span>」" となるようラップ
+                            bracket_stack.slice( exist_bracket_index + 1 ).map( () => push_text( get_close_tag() ) );
+                            html_stack.push( text_stack.join( '' ) );
+                            text_stack = [];
+                            bracket_stack = bracket_stack.slice( 0, exist_bracket_index + 1 );
                         }
                         
-                        bracket_stack.slice( exist_bracket_index + 1 ).map( () => push_text( get_close_tag() ) );
-                        html_stack.push( text_stack.join( '' ) );
-                        text_stack = [];
-                        bracket_stack = bracket_stack.slice( 0, exist_bracket_index + 1 );
                         check_bracket( bracket );
                     },
                     
@@ -251,7 +386,7 @@ $.fn.highlight_brackets = ( () => {
                     }
                     
                     var $parent = $( this ).parent(),
-                        parent = $parent.get( 0 ),
+                        parent = $parent[ 0 ],
                         parent_node_name = parent.nodeName.toLowerCase();
                     
                     if ( exclude_node_map[ parent_node_name ] ) {
@@ -273,7 +408,7 @@ $.fn.highlight_brackets = ( () => {
                         };
                     
                     if ( options.asyncRewrite ) {
-                        setTimeout( rewrite, 1 );
+                        setTimeout( rewrite, 1000 * Math.floor( index / 100 ) + 1 );
                     }
                     else {
                         rewrite();
@@ -283,13 +418,38 @@ $.fn.highlight_brackets = ( () => {
         else {
             $target_nodes = $self.each( function ( index ) {
                 var $node = $( this ),
+                    
+                    is_rewrited = false,
+                    
                     rewrite = () => {
+                        if ( is_rewrited ) {
+                            log_debug( 'index:', index, 'is already rewrited' );
+                            return;
+                        }
                         $node.html( get_highlight_html( $node.html() ) );
+                        $node.off( 'inview' );
+                        is_rewrited = true;
+                        
                         log_remain( index );
                     };
                 
                 if ( options.asyncRewrite ) {
-                    setTimeout( rewrite, 1 );
+                    var wheel_event = ( 'onwheel' in document ) ? 'wheel' : ( ( 'onmousewheel' in document ) ? 'mousewheel' : 'DOMMouseScroll' );
+                    
+                    $node.on( 'mousemove mouseover mouseout ' + wheel_event, function ( event ) {
+                        log_debug( 'mouse event:', index, event );
+                        rewrite();
+                    } );
+                    
+                    $node.on( 'inview', function ( event, is_inview ) {
+                        log_debug( 'inview index:', index, is_inview );
+                        
+                        if ( is_inview ) {
+                            rewrite();
+                        }
+                    } );
+                    
+                    setTimeout( rewrite, 1000 * Math.floor( index / 100 ) + 1 );
                 }
                 else {
                     rewrite();
@@ -307,7 +467,11 @@ $.fn.highlight_brackets = ( () => {
 function main() {
     $.setHighlightBracketsColors();
     
-    var start = new Date().getTime(); log_info( 'start' );
+    init_inview_event( {
+        $viewport : $( 'div#right_content' )
+    } );
+    
+    var start = new Date().getTime(); log_info( 'set start' );
     
     $( [
         'div.ParagraphSentence',
@@ -331,7 +495,7 @@ function main() {
         //  levelColors : [ '#CC0000', '#999900', '#009999', '#2020A0', '#CC00CC' ]
     } );
     
-    var end = new Date().getTime(); log_info( 'end - elapsed:', end - start, 'ms' );
+    var end = new Date().getTime(); log_info( 'done.', '(elapsed:', end - start, 'ms)' );
     
 } // end of main()
 
