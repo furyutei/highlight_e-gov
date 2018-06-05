@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name            highlight_e-gov
 // @namespace       https://furyu.hatenablog.com/
-// @version         0.0.1.2
+// @version         0.0.1.3
 // @description     e-gov 法令条文の括弧書きを強調
 // @author          furyu
 // @match           *://elaws.e-gov.go.jp/search/*
@@ -126,9 +126,7 @@ var to_array = ( array_like_object ) => Array.from( array_like_object ),
 
 
 var init_inview_event = ( options ) => {
-    options = $.extend( {}, { $viewport : $( window ), watch_interval : 3000, fire_on_outview_event : false, split_count : 0, exist_check : false }, options );
-    //options = $.extend( {}, { $viewport : $( window ), watch_interval : 1500, fire_on_outview_event : false, split_count : 1000, exist_check : false }, options );
-    // TODO: パラメータ要調整
+    options = $.extend( {}, { $viewport : $( window ), watch_interval : 500, fire_on_outview_event : false, split_count : 0, exist_check : false, prefetch_area_ratio : 0.5 }, options );
     
     var $viewport = options.$viewport,
         inview_objects = [],
@@ -151,7 +149,7 @@ var init_inview_event = ( options ) => {
             var viewport_offset = $viewport.offset() || { top: 0, left: 0 },
                 viewport_size = { height : $viewport.height(), width : $viewport.width() },
                 viewport_scroll = { top : $viewport.scrollTop(), left : $viewport.scrollLeft() },
-                margin_offset = { height : viewport_size.height * 1.0, width : viewport_size.width * 1.0 },
+                prefetch_area = { height : viewport_size.height * options.prefetch_area_ratio, width : viewport_size.width * options.prefetch_area_ratio },
                 
                 check_inview_object = ( inview_object ) => {
                     var selector = inview_object.data.selector,
@@ -168,10 +166,10 @@ var init_inview_event = ( options ) => {
                         last_is_inview = $element.data( 'inview' );
                     
                     if (
-                        ( viewport_offset.left < element_offset.left + element_size.width + margin_offset.width ) &&
-                        ( element_offset.left < viewport_offset.left + viewport_size.width + margin_offset.width ) &&
-                        ( viewport_offset.top < element_offset.top + element_size.height + margin_offset.height ) &&
-                        ( element_offset.top < viewport_offset.top + viewport_size.height + margin_offset.height )
+                        ( viewport_offset.left < element_offset.left + element_size.width + prefetch_area.width ) &&
+                        ( element_offset.left < viewport_offset.left + viewport_size.width + prefetch_area.width ) &&
+                        ( viewport_offset.top < element_offset.top + element_size.height + prefetch_area.height ) &&
+                        ( element_offset.top < viewport_offset.top + viewport_size.height + prefetch_area.height )
                     ) {
                         if ( ! last_is_inview ) {
                             $element.data( 'inview', true ).trigger( 'inview', [ true ] );
@@ -277,6 +275,10 @@ $.fn.highlight_brackets = ( () => {
         
         var $self = this,
             
+            $containers = options.$containers || $( [] ),
+            container_attribute_name = options.container_attribute_name || 'data-highlight_brackets-container-id',
+            callbacks_map = {},
+            
             $target_nodes,
             total_number = 0,
             remain_number = 0,
@@ -378,6 +380,23 @@ $.fn.highlight_brackets = ( () => {
                 }
             };
         
+        $containers.each( function ( index ) {
+            var $container = $( this );
+            
+            $container.attr( container_attribute_name, index );
+            callbacks_map[ index ] = [];
+            
+            $container.on( 'inview', function ( event, is_inview ) {
+                log_debug( 'inview container index:', index, is_inview );
+                
+                if ( is_inview ) {
+                    callbacks_map[ index ].map( ( callback ) => {
+                        callback();
+                    } );
+                }
+            } );
+        } );
+        
         if ( options.strictMode ) {
             $target_nodes = $self.find( '*' ).addBack().not( excludeNodes.join( ',' ) ).contents()
                 .filter( function() {
@@ -408,7 +427,14 @@ $.fn.highlight_brackets = ( () => {
                         };
                     
                     if ( options.asyncRewrite ) {
-                        setTimeout( rewrite, 1000 * Math.floor( index / 100 ) + 1 );
+                        var $container = $text_node.closest( '*[' + container_attribute_name + ']' );
+                        
+                        if ( 0 < $container.length ) {
+                            callbacks_map[ $container.attr( container_attribute_name ) ].push( rewrite );
+                        }
+                        else {
+                            setTimeout( rewrite, 1000 * Math.floor( index / 100 ) + 1 );
+                        }
                     }
                     else {
                         rewrite();
@@ -434,22 +460,29 @@ $.fn.highlight_brackets = ( () => {
                     };
                 
                 if ( options.asyncRewrite ) {
-                    var wheel_event = ( 'onwheel' in document ) ? 'wheel' : ( ( 'onmousewheel' in document ) ? 'mousewheel' : 'DOMMouseScroll' );
+                    var $container = $node.closest( '*[' + container_attribute_name + ']' );
                     
-                    $node.on( 'mousemove mouseover mouseout ' + wheel_event, function ( event ) {
-                        log_debug( 'mouse event:', index, event );
-                        rewrite();
-                    } );
-                    
-                    $node.on( 'inview', function ( event, is_inview ) {
-                        log_debug( 'inview index:', index, is_inview );
+                    if ( 0 < $container.length ) {
+                        callbacks_map[ $container.attr( container_attribute_name ) ].push( rewrite );
+                    }
+                    else {
+                        var wheel_event = ( 'onwheel' in document ) ? 'wheel' : ( ( 'onmousewheel' in document ) ? 'mousewheel' : 'DOMMouseScroll' );
                         
-                        if ( is_inview ) {
+                        $node.on( 'mousemove mouseover mouseout ' + wheel_event, function ( event ) {
+                            log_debug( 'mouse event:', index, event );
                             rewrite();
-                        }
-                    } );
-                    
-                    setTimeout( rewrite, 1000 * Math.floor( index / 100 ) + 1 );
+                        } );
+                        
+                        $node.on( 'inview', function ( event, is_inview ) {
+                            log_debug( 'inview index:', index, is_inview );
+                            
+                            if ( is_inview ) {
+                                rewrite();
+                            }
+                        } );
+                        
+                        setTimeout( rewrite, 1000 * Math.floor( index / 100 ) + 1 );
+                    }
                 }
                 else {
                     rewrite();
@@ -473,7 +506,9 @@ function main() {
     
     var start = new Date().getTime(); log_info( 'set start' );
     
-    $( [
+    var $containers = $('div#right_content div.LawBody').children();
+    
+    $containers.find( [
         'div.ParagraphSentence',
         'div.ItemSentence',
         'div.ItemSentence2',
@@ -484,7 +519,7 @@ function main() {
         'div.Subitem3Sentence',
         'div.Subitem3Sentence2',
         //'div.TableStruct td',
-        // TODO: 'div.TableStruct td' の場合、td 下に div がある場合でかつ閉括弧から始まるケース（例：<td class="..."><div class="Sentence">源泉徴収）の</div></td>)等で、spanがdivの外に出てしまう
+        // TODO: 'div.TableStruct td' の場合、td 下に div がある場合でかつ閉括弧から始まるケース（例：<td class="..."><div class="Sentence">源泉徴収）の</div></td>）等で、spanがdivの外に出てしまう
         //       ※ strictMode : true ならば発生しないが、処理が重くなり、実用に耐えない
         // → 'div.TableStruct td div' に変更して暫定対応
         'div.TableStruct td div',
@@ -493,6 +528,7 @@ function main() {
         //  leftBrackets : '「（',
         //  rightBrackets : '」）',
         //  levelColors : [ '#CC0000', '#999900', '#009999', '#2020A0', '#CC00CC' ]
+        $containers : $containers
     } );
     
     var end = new Date().getTime(); log_info( 'done.', '(elapsed:', end - start, 'ms)' );
