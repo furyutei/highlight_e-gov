@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name            highlight_e-gov
 // @namespace       https://furyu.hatenablog.com/
-// @version         0.0.1.3
+// @version         0.0.1.4
 // @description     e-gov 法令条文の括弧書きを強調
 // @author          furyu
 // @match           *://elaws.e-gov.go.jp/search/*
@@ -126,7 +126,8 @@ var to_array = ( array_like_object ) => Array.from( array_like_object ),
 
 
 var init_inview_event = ( options ) => {
-    options = $.extend( {}, { $viewport : $( window ), watch_interval : 500, fire_on_outview_event : false, split_count : 0, exist_check : false, prefetch_area_ratio : 0.5 }, options );
+    options = $.extend( {}, { $viewport : $( window ), watch_interval : 1000, fire_on_outview_event : false, split_count : 0, exist_check : false, prefetch_area_ratio : 0.5 }, options );
+    // TODO: $viewport が $( window ) の場合は正しく動作しない
     
     var $viewport = options.$viewport,
         inview_objects = [],
@@ -146,9 +147,10 @@ var init_inview_event = ( options ) => {
         },
         
         check_inview = function () {
-            var viewport_offset = $viewport.offset() || { top: 0, left: 0 },
+            var viewport_offset = $viewport.offset() || { top : 0 , left : 0 }, // TODO: 遅い時がある(～500ms)、HTML書換によるレンダリングの影響か？
                 viewport_size = { height : $viewport.height(), width : $viewport.width() },
-                viewport_scroll = { top : $viewport.scrollTop(), left : $viewport.scrollLeft() },
+                //viewport_scroll = { top : $viewport.scrollTop(), left : $viewport.scrollLeft() },
+                
                 prefetch_area = { height : viewport_size.height * options.prefetch_area_ratio, width : viewport_size.width * options.prefetch_area_ratio },
                 
                 check_inview_object = ( inview_object ) => {
@@ -230,7 +232,13 @@ var init_inview_event = ( options ) => {
         }
     };
     
-    $( window ).on( 'scroll.inview resize.inview scrollstop.inview', function () {
+    $( window ).on( 'scroll.inview resize.inview scrollstop.inview', function ( event ) {
+        check_inview();
+    } );
+    
+    $viewport.on( 'check-inview', function ( event ) {
+        event.stopPropagation();
+        event.preventDefault();
         check_inview();
     } );
     
@@ -239,6 +247,7 @@ var init_inview_event = ( options ) => {
             check_inview();
         } );
     }
+    
 }; // end of init_inview_event()
 
 
@@ -268,15 +277,21 @@ $.fn.highlight_brackets = ( () => {
             return ( string ) => string.replace( reg_target, '\\$&' );
         } )(),
         
-        $work = $( '<div/>' );
+        $work = $( '<div/>' ),
+        container_index = 1;
     
     return function ( options ) {
         options = $.extend( {}, DEFAULT_HIGHLIGHT_BRACKETS_OPTIONS, options );
         
         var $self = this,
             
+            all_done = options.all_done || ( () => {} ),
+            
             $containers = options.$containers || $( [] ),
-            container_attribute_name = options.container_attribute_name || 'data-highlight_brackets-container-id',
+            container_tag_name = options.container_tag_name || 'div',
+            container_id_name = options.container_id_name || 'data-highlight_brackets-container-id',
+            container_counter_name = options.container_counter_name || 'data-highlight_brackets-container-counter',
+            container_selector = container_tag_name + '[' + container_id_name + ']',
             callbacks_map = {},
             
             $target_nodes,
@@ -372,29 +387,44 @@ $.fn.highlight_brackets = ( () => {
                 return html_stack.join( '' );
             },
             
-            log_remain = ( index ) => {
+            check_remain = ( index ) => {
                 log_debug( 'index:', index, 'done. (remain: ', (-- remain_number), '/', total_number, ')' );
                 
                 if ( remain_number <= 0 ) {
-                    log_info( 'all done.' );
+                    log_debug( 'all done.' );
+                    all_done();
                 }
             };
         
-        $containers.each( function ( index ) {
-            var $container = $( this );
+        $containers.each( function () {
+            var $container = $( this ),
+                index = container_index,
+                callback_all = () => {
+                    callbacks_map[ index ].map( ( callback ) => callback() );
+                    callbacks_map[ index ] = [];
+                    $container.off( 'inview' );
+                };
             
-            $container.attr( container_attribute_name, index );
+            $container.attr( {
+                [ container_id_name ] : index,
+                [ container_counter_name ] : 0
+            } );
+            
             callbacks_map[ index ] = [];
             
             $container.on( 'inview', function ( event, is_inview ) {
                 log_debug( 'inview container index:', index, is_inview );
+                event.stopPropagation();
+                event.preventDefault();
                 
                 if ( is_inview ) {
-                    callbacks_map[ index ].map( ( callback ) => {
-                        callback();
-                    } );
+                    callback_all();
                 }
             } );
+            
+            //setTimeout( () => callback_all(), index * 10 );
+            
+            container_index ++;
         } );
         
         if ( options.strictMode ) {
@@ -420,17 +450,30 @@ $.fn.highlight_brackets = ( () => {
                 } )
                 .each( function ( index ) {
                     var $text_node = $( this ),
+                        
+                        is_rewrited = false,
+                        
                         rewrite = () => {
+                            if ( is_rewrited ) {
+                                log_debug( 'index:', index, 'is already rewrited' );
+                                return;
+                            }
                             $text_node.before( $work.html( get_highlight_html( $text_node.text() ) ).contents() );
                             $text_node.remove();
-                            log_remain( index );
+                            is_rewrited = true;
+                            
+                            if ( options.asyncRewrite ) {
+                                check_remain( index );
+                            }
                         };
                     
                     if ( options.asyncRewrite ) {
-                        var $container = $text_node.closest( '*[' + container_attribute_name + ']' );
+                        var $container = $text_node.closest( container_selector ),
+                            container_id = $container.attr( container_id_name );
                         
                         if ( 0 < $container.length ) {
-                            callbacks_map[ $container.attr( container_attribute_name ) ].push( rewrite );
+                            callbacks_map[ container_id ].push( rewrite );
+                            $container.attr( container_counter_name, callbacks_map[ container_id ].length );
                         }
                         else {
                             setTimeout( rewrite, 1000 * Math.floor( index / 100 ) + 1 );
@@ -456,14 +499,18 @@ $.fn.highlight_brackets = ( () => {
                         $node.off( 'inview' );
                         is_rewrited = true;
                         
-                        log_remain( index );
+                        if ( options.asyncRewrite ) {
+                            check_remain( index );
+                        }
                     };
                 
                 if ( options.asyncRewrite ) {
-                    var $container = $node.closest( '*[' + container_attribute_name + ']' );
+                    var $container = $node.closest( container_selector ),
+                        container_id = $container.attr( container_id_name );
                     
                     if ( 0 < $container.length ) {
-                        callbacks_map[ $container.attr( container_attribute_name ) ].push( rewrite );
+                        callbacks_map[ container_id ].push( rewrite );
+                        $container.attr( container_counter_name, callbacks_map[ container_id ].length );
                     }
                     else {
                         var wheel_event = ( 'onwheel' in document ) ? 'wheel' : ( ( 'onmousewheel' in document ) ? 'mousewheel' : 'DOMMouseScroll' );
@@ -475,6 +522,8 @@ $.fn.highlight_brackets = ( () => {
                         
                         $node.on( 'inview', function ( event, is_inview ) {
                             log_debug( 'inview index:', index, is_inview );
+                            event.stopPropagation();
+                            event.preventDefault();
                             
                             if ( is_inview ) {
                                 rewrite();
@@ -491,6 +540,26 @@ $.fn.highlight_brackets = ( () => {
         }
         
         total_number = remain_number = $target_nodes.length;
+        log_debug( 'total element number:', total_number );
+        
+        if ( total_number <= 0 ) {
+            if ( options.asyncRewrite ) {
+                all_done();
+            }
+        }
+        else {
+            $containers.each( function () {
+                var $container = $( this ),
+                    index = $container.attr( container_id_name ),
+                    callbacks = callbacks_map[ index ];
+                
+                if ( 0 < callbacks.length ) {
+                    // 要素が存在する最初のコンテナ下のみ処理
+                    callbacks.map( ( callback ) => callback() );
+                    return false;
+                }
+            } );
+        }
         
         return $self;
     };
@@ -498,15 +567,25 @@ $.fn.highlight_brackets = ( () => {
 
 
 function main() {
+    var start = new Date().getTime(); log_info( 'set start' );
+    
+    var $viewport = $( 'div#right_content' ),
+        $root_container = $('div#right_content div.LawBody'),
+        $containers = $root_container.children().add( $root_container.children( 'div.MainProvision' ).children() );
+    
     $.setHighlightBracketsColors();
     
     init_inview_event( {
-        $viewport : $( 'div#right_content' )
+        $viewport : $viewport
     } );
     
-    var start = new Date().getTime(); log_info( 'set start' );
-    
-    var $containers = $('div#right_content div.LawBody').children();
+    $root_container.children( [
+        // div.LawBody 直下に対象がある場合のみこちらに登録
+        'div.EnactStatement'
+    ].join( ',' ) ).highlight_brackets( {
+        $containers : $root_container,
+        all_done : () => log_info( 'Group A: all done.' )
+    } );
     
     $containers.find( [
         'div.ParagraphSentence',
@@ -522,14 +601,17 @@ function main() {
         // TODO: 'div.TableStruct td' の場合、td 下に div がある場合でかつ閉括弧から始まるケース（例：<td class="..."><div class="Sentence">源泉徴収）の</div></td>）等で、spanがdivの外に出てしまう
         //       ※ strictMode : true ならば発生しないが、処理が重くなり、実用に耐えない
         // → 'div.TableStruct td div' に変更して暫定対応
-        'div.TableStruct td div',
+        'div.TableStruct td div'
     ].join( ',' ) ).highlight_brackets( {
         // ※オプション値を指定可能(DEFAULT_HIGHLIGHT_BRACKETS_OPTIONSの同名要素を上書き)
         //  leftBrackets : '「（',
         //  rightBrackets : '」）',
         //  levelColors : [ '#CC0000', '#999900', '#009999', '#2020A0', '#CC00CC' ]
-        $containers : $containers
+        $containers : $containers,
+        all_done : () => log_info( 'Group B: all done.' )
     } );
+    
+    $viewport.trigger( 'check-inview', [] );
     
     var end = new Date().getTime(); log_info( 'done.', '(elapsed:', end - start, 'ms)' );
     
